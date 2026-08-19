@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 Fetch the real assignment corpus + released dev topics/qrels via ir_datasets
 and write them into data/full/ in the same format used by data/toy/.

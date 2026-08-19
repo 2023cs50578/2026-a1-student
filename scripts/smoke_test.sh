@@ -12,11 +12,11 @@ pytest tests/test_metrics.py -v
 
 echo
 echo "== Full harness run on the toy set =="
-python3 -m harness.run_harness \
+python -m harness.run_harness \
   --corpus data/toy/corpus.jsonl \
   --queries data/toy/queries_dev.tsv \
   --qrels data/toy/qrels_dev.txt \
-  --baseline-run data/toy/baseline_run_dev.trec \
+  --baseline-run data/toy/reference_bm25_run_dev.trec \
   --run-out runs/dev_run.trec \
   --report-out runs/dev_report.json
 

@@ -6,7 +6,7 @@ build the inverted index yourself, without an existing search/indexing
 library (Lucene, Elasticsearch, Pyserini, Whoosh, etc.).
 
 A `tokenize()` helper is provided below purely so that tokenization is
-consistent across your Boolean/VSM, BM25, and language-model scorers —
+consistent across your Boolean/VSM and BM25 scorers —
 feel free to replace it (e.g. add stemming or stopword removal), just make
 sure every scorer that reads this index was built with the same tokenizer.
 
@@ -15,7 +15,16 @@ collection statistics you track, whether you add positions for
 proximity/phrase features — is your design decision. `InvertedIndex`
 below sketches a minimal, obviously-sufficient shape; you do not have to
 use it, but if you do, filling in `build()` and `document_frequency()` is
-enough to support Boolean/VSM, BM25, and a unigram language model.
+enough to support Boolean/VSM and BM25.
+
+Persistence (assignment Section 4.1 / Section 7 "index size" scoring):
+`build_index()` in retrieve.py runs in one process and `load_index()` runs
+in a separate, later one — so whatever this index needs at query time must
+round-trip through `save()`/`load()` below, not just live as Python
+attributes. The on-disk byte size of what `save()` writes is graded
+directly (smaller, relative to the class median, scores better), so a
+compact postings encoding is worth more here than in most course
+assignments — see the `save()` docstring for concrete starting points.
 """
 import re
 from typing import Dict, List, Tuple
@@ -57,3 +66,35 @@ class InvertedIndex:
         TODO(you): implement using self.postings.
         """
         raise NotImplementedError("Implement InvertedIndex.document_frequency().")
+
+    def save(self, index_dir: str) -> None:
+        """Persist everything document_frequency() / your scorers need to
+        `index_dir`, so `load()` can reconstruct this object in a fresh
+        process with no memory of `build()` ever having run. Called from
+        retrieve.build_index().
+
+        The on-disk byte size of whatever you write here is graded
+        directly (assignment Section 7, "index size", relative to the
+        class median) — some starting points, roughly in order of effort:
+          - json/pickle-dump self.postings etc. directly (works, but
+            verbose: repeats every doc_id string per posting).
+          - drop self.doc_text if your scorers don't need raw text at
+            query time (BM25/VSM only need term-frequency and length
+            statistics, not the original documents).
+          - delta-encode each postings list's doc-ids (sorted ascending,
+            store gaps instead of absolute ids) and varint/byte-pack them,
+            instead of a naive JSON list of integers.
+
+        TODO(you): implement.
+        """
+        raise NotImplementedError("Implement InvertedIndex.save() — see assignment Section 4.1.")
+
+    @classmethod
+    def load(cls, index_dir: str) -> "InvertedIndex":
+        """Reconstruct an InvertedIndex purely from what save() wrote to
+        `index_dir`. Called in a fresh process — do not rely on any state
+        other than what's actually on disk in `index_dir`.
+
+        TODO(you): implement, matching whatever format save() wrote.
+        """
+        raise NotImplementedError("Implement InvertedIndex.load() — see assignment Section 4.1.")

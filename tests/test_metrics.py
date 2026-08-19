@@ -10,6 +10,7 @@ import math
 from harness.metrics import (
     average_precision,
     dcg_at_k,
+    evaluate_run,
     ndcg_at_k,
     precision_at_k,
     reciprocal_rank,
@@ -71,6 +72,50 @@ def test_reciprocal_rank_no_relevant_found_is_zero():
     qrels = {"a": 1}
     ranked = ["b", "c"]
     assert reciprocal_rank(ranked, qrels) == 0.0
+
+
+def test_evaluate_run_rejects_score_inflation_from_duplicate_doc_ids():
+    # A single relevant document (relevance 3), "ranked" as the same
+    # doc_id ten times in a row. Before evaluate_run() deduplicated ranked
+    # lists, this scored nDCG@10 ~= 4.54 and MAP@10 = 10.0 — both were
+    # supposed to be capped at 1.0, since a run is only allowed to count
+    # each doc_id's relevance once. A submission could otherwise dominate
+    # the leaderboard just by repeating whichever single relevant doc it
+    # happened to find, regardless of ranking quality.
+    qrels = {"q1": {"d1": 3}}
+    run_exploit = {"q1": [("d1", float(10 - i)) for i in range(10)]}
+    result = evaluate_run(run_exploit, qrels, k=10)
+
+    assert result["aggregate"]["ndcg@10"] == 1.0
+    assert result["aggregate"]["map@10"] == 1.0
+    assert result["per_query"]["q1"]["num_ranked"] == 1  # 10 slots, 1 unique doc
+
+
+def test_map_at_10_is_truncated_to_top_10_and_normalised_by_full_relevant_count():
+    # 15 relevant docs total (qrels), but retrieve() only ever returns up
+    # to k results, and evaluate_run() only scores the top 10 of those for
+    # "map@10" — matching nDCG@10's cutoff, and making the label accurate
+    # regardless of what --k the harness was invoked with. This is exactly
+    # why it's called MAP@10, not plain MAP: full MAP would need precision
+    # at every rank where a relevant doc appears, which needs the whole
+    # collection ranked, not just a top-k list.
+    qrels_for_q = {f"r{i}": 1 for i in range(1, 16)}  # r1..r15, all relevant
+    ranked = ["r1", "i1", "i2", "i3", "r2", "i4", "i5", "i6", "i7", "r3", "r4", "i8"]
+    # Top 10 = [r1, i1, i2, i3, r2, i4, i5, i6, i7, r3] -> hits at ranks 1, 5, 10.
+    # r4 sits at rank 11 and must NOT count toward MAP@10.
+    expected_map_at_10 = (1 / 1 + 2 / 5 + 3 / 10) / 15
+
+    qrels = {"q1": qrels_for_q}
+    run = {"q1": [(doc_id, float(len(ranked) - i)) for i, doc_id in enumerate(ranked)]}
+    result = evaluate_run(run, qrels, k=10)
+
+    assert math.isclose(result["per_query"]["q1"]["map@10"], expected_map_at_10, rel_tol=1e-9)
+    assert math.isclose(result["aggregate"]["map@10"], expected_map_at_10, rel_tol=1e-9)
+
+    # Sanity check: if you (incorrectly) didn't truncate, r4 at rank 11
+    # would also contribute and the value would come out higher.
+    untruncated_ap = average_precision(ranked, qrels_for_q)
+    assert untruncated_ap > expected_map_at_10
 
 
 def test_precision_at_k_worked_example():

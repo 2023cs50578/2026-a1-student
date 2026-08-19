@@ -34,8 +34,15 @@ from submission.indexer import InvertedIndex
 
 def build(index: InvertedIndex) -> None:
     """Optional: precompute anything BM25-specific (e.g. cached IDF values
-    per term) from the InvertedIndex built in indexer.py. Called once,
-    from your retrieve.build_index()."""
+    per term) from the InvertedIndex built in indexer.py.
+
+    Call this from retrieve.load_index(), not retrieve.build_index() —
+    the harness runs those two in separate processes, so any cache this
+    creates only needs to exist in the process that also calls
+    retrieve(). If you want a precomputed cache to persist across the
+    build/load boundary too, write it out via InvertedIndex.save() instead
+    (it then counts toward your index-size score) and rebuild the cache
+    here from the loaded index."""
     raise NotImplementedError
 
 

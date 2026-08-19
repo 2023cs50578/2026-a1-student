@@ -1,21 +1,31 @@
 """
-harness/generate_baseline.py — regenerate the "baseline you must beat"
-run file using the third-party `rank_bm25` library (untuned, k1=1.2,
-b=0.75 — the exact values named in the assignment, Section 6).
+harness/generate_baseline.py — generate YOUR OWN local BM25 comparison
+run, using the third-party `rank_bm25` library with generic textbook
+parameters (k1=1.2, b=0.75 by default — the values commonly cited as
+reasonable defaults, e.g. in Robertson & Zaragoza's survey).
 
-This is explicitly the "reference tooling ... a BM25 baseline you are
-explicitly trying to beat" mentioned in the assignment (Section 6): it is
-a standard library call, not a from-scratch implementation, so running or
-reading this script does not give away a Boolean/VSM/BM25/LM
-implementation you could pass off as your own. Using `rank_bm25` (or any
-other existing search library) inside your own submission/ code is not
-allowed — see the assignment's Academic Integrity section.
+Read this carefully: this is a tool for your own sanity-checking, not a
+reproduction of the official grading baseline. Course staff score you
+against a separately tuned BM25 reference on data you don't have, with
+parameters that are not disclosed and are deliberately not assumed to
+match the defaults below (assignment Section 7). Running this script and
+confirming you beat *its* output tells you very little about whether
+you'd beat the real one — use it to catch obviously broken rankings, not
+as a finish line.
+
+This is explicitly the "reference tooling" mentioned in the assignment
+(Section 6): it is a standard library call, not a from-scratch
+implementation, so running or reading this script does not give away a
+Boolean/VSM/BM25 implementation you could pass off as your own. Using
+`rank_bm25` (or any other existing search library) inside your own
+submission/ code is not allowed — see the assignment's Academic
+Integrity section.
 
 Usage:
     python -m harness.generate_baseline \
         --corpus data/toy/corpus.jsonl \
         --queries data/toy/queries_dev.tsv \
-        --out data/toy/baseline_run_dev.trec \
+        --out data/toy/reference_bm25_run_dev.trec \
         --k 10
 """
 import argparse
@@ -59,7 +69,7 @@ def main():
         run[qid] = ranked
     query_time = time.perf_counter() - t0
 
-    write_run(args.out, run, run_tag=f"bm25-baseline-k1={args.k1}-b={args.b}")
+    write_run(args.out, run, run_tag=f"rank_bm25-reference-k1={args.k1}-b={args.b}")
     print(f"Wrote baseline run for {len(queries)} queries to {args.out}")
     print(f"Index build time: {build_time:.4f}s | total query time: {query_time:.4f}s "
           f"({query_time / max(len(queries), 1) * 1000:.2f} ms/query)")
