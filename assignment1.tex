@@ -1,4 +1,4 @@
-\documentclass[12pt]{article}
+\documentclass[10pt]{article}
 %\usepackage[moderate]{savetrees}
 \usepackage[scale=0.8]{geometry}
 \usepackage{url}
@@ -19,15 +19,31 @@ colback=red!5!white,colframe=red!75!black,fonttitle=\bfseries, title=Examp.~\the
 \newcommand{\sbcomment}[1]{\textcolor{red}{\textbf{SBJ:}#1}}
 \usepackage{hyperref}
 \usepackage{dirtree}
+\usepackage{xspace}
 \newcommand{\eat}[1]{}
-\newcommand{\STARTDAY}{4}
+\newcommand{\STARTDAY}{4\xspace}
 \begin{document}
 \title{COL 7364/764 Assignment 1 - Sparse Retrieval}
-\date{2026 - Version 1.0 \\(dated 19th August 2026)}
+\date{2026 - Version 1.0 \\(dated 20th August 2026)}
 \maketitle
 \noindent
-\begin{mybox}{Deadline}
-Submission of the complete implementation, and the report on the algorithms is due on \textbf{September 3, 2023, 11:59 PM}. All submissions are to be made on Moodle. 
+\begin{mybox}{Important Dates} 
+This assignment runs in three phases. Please note that the deadline is set for 5PM of each day. We will not change it. 
+\begin{center}
+\begin{tabular}{l p{8cm} p{3cm} }
+\toprule
+\textbf{Phase} & \textbf{Description} & \textbf{Date} \\
+\midrule
+Initial Submission & You will be given a dataset and topics to work with after \STARTDAY days from the release of the assignment. You are expected to submit a version which passes all the conformance tests. After the submission deadline, we will compare it against the instructors' competitive BM25 reference implementation, and only those which pass will be considered for next phase. & \textbf{28th August 2026, 5PM IST} \\
+\cmidrule(lr){1-3}
+Competition Round & We will release the full leaderboard every day between the previous deadline day, and the final deadline date for this phase. The leaderboard is computed against a held out dataset and topics (will be revealed to you only after this deadline). You may submit your implementation as many times as you want during this phase. For each day, we will consider the latest version you have submitted by 5PM each day. & \textbf{29th August 2026, 5PM IST -- 3rd September 2026, 5PM IST} (please note the time) \\ 
+\cmidrule(lr){1-3}
+Report Submission & You are required to submit a report that explains your approach both in the initial submission phase as well as the competition round. You are also required to submit all the performance metrics (see the document below) you had in the released dataset and topics in each phase. &  \textbf{6th September 2026, 11:59PM IST} \\ 
+\bottomrule
+\end{tabular}
+\end{center}
+
+All submissions are to be made on Moodle. 
 \end{mybox}
 
 \begin{exbox}{Instructions}
@@ -54,11 +70,20 @@ The file structure in each submission must be exactly as follows (DO NOT RENAME 
 
  		\dirtree{%
  		.1 20XXYYYY999/.
- 		.2 conftest.py.		.2 data/.
+ 		.2 conftest.py.
+		.2 data/.
 		.3 README.md.
-		.3 toy/.		.2 Dockerfile.		.2 docs/.
+		.3 toy/.
+		.2 Dockerfile.
+		.2 docs/.
 		.3 DOCKER\_SUBMISSION.md.
-		.3 SUBMISSION\_INTERFACE.md.		.2 harness/.		.2 README.md.		.2 requirements.txt.		.2 scripts/.		.2 submission/.		.2 tests/.
+		.3 SUBMISSION\_INTERFACE.md.
+		.2 harness/.
+		.2 README.md.
+		.2 requirements.txt.
+		.2 scripts/.
+		.2 submission/.
+		.2 tests/.
 		}
 
 \end{exbox}
