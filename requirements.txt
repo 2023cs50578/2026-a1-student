@@ -1,6 +1,10 @@
 # Core (needed to run the harness and the shipped trivial baseline)
 pytest>=7.0
 
+# Vectorised postings encode/decode and score accumulation in submission/.
+# Explicitly permitted by the assignment ("numerical libraries (NumPy)").
+numpy>=1.24
+
 # Available if you want to compile part of your submission as a C/C++
 # extension (e.g. via Cython) for the efficiency / index-size leaderboard
 # components — see docs/SUBMISSION_INTERFACE.md, "Compiled extensions".

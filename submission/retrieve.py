@@ -2,118 +2,115 @@
 submission/retrieve.py — THE REQUIRED COMPETITION ENTRYPOINT.
 
 The grading harness only ever imports and calls the three functions below.
-Their names and signatures are fixed by the assignment (Section 5 of the
-assignment spec, "Submission Interface & Conformance Checking") — do not
-rename them, change their signatures, or move them out of this file.
+Their names and signatures are fixed by the assignment (Section 5,
+"Submission Interface & Conformance Checking") — do not rename them, change
+their signatures, or move them out of this file.
 
-    build_index(corpus_path: str, index_dir: str) -> None
-        Called once, in its own process, with the path to a corpus.jsonl
-        file (see data/README.md) and a directory to write your index
-        into. Build whatever index and statistics you need, and WRITE
-        THEM TO index_dir. The harness runs build_index() and
-        load_index()/retrieve() in two SEPARATE processes on purpose (see
-        harness/run_harness.py's module docstring) — nothing you only
-        hold in memory here survives into load_index(). This call is
-        timed as your "index build time" efficiency metric. The harness
-        also measures the on-disk byte size of index_dir once this
-        returns — that's your "index size" score (assignment Section 7),
-        so write only what retrieve() actually needs, and consider
-        compressing it.
+    build_index(corpus_path, index_dir) -> None
+        Runs once, in its own process. Analyses the corpus, inverts it, and
+        writes the index to `index_dir`. Timed as index build time; the
+        resulting on-disk size is its own graded component.
 
-    load_index(index_dir: str) -> None
-        Called once, in a fresh process, before any retrieve() calls.
-        Reconstruct everything retrieve() needs by reading index_dir —
-        and only index_dir; there is no leftover state from
-        build_index() to fall back on. Timed as your "index load time".
+    load_index(index_dir) -> None
+        Runs once, in a FRESH process, reading `index_dir` and nothing else.
+        Memory-maps the postings and precomputes the query-independent
+        scoring tables. Timed as index load time.
 
-    retrieve(query: str, k: int = 10) -> List[Tuple[str, float]]
-        Called once per query, only after load_index() has run in the
-        same process. Return up to k (doc_id, score) pairs, sorted by
-        score descending (highest score = most relevant). This is exactly
-        the ranking the harness scores with nDCG@10 / MAP@10. doc_id values
-        must be ones that appeared in the corpus passed to build_index().
+    retrieve(query, k) -> list[(doc_id, score)]
+        Runs once per query, after load_index(). Returns up to k results,
+        sorted by score descending, no doc_id repeated.
 
-This file ships with a trivial, fully-working baseline — return the first
-k documents in the order build_index() saw them, ignoring the query
-entirely — wired up below. It actually persists to disk and reloads
-correctly, so it exercises the full build -> disk -> fresh process -> load
--> query path end-to-end from your very first commit. Its scores will be
-close to zero; replace the logic, but keep the same
-persist-in-build / reconstruct-in-load shape.
+How the pieces fit together
+---------------------------
+    corpus.jsonl
+        |  indexer.analyze()      lowercase -> tokenise -> stopword -> Porter
+        v
+    InvertedIndex.build()         single-pass in-memory inversion
+        |  InvertedIndex.save()   VByte d-gaps + zlib dictionary
+        v
+    index_dir/                    ~~~ process boundary ~~~
+        |  InvertedIndex.load()   mmap postings, decompress dictionary
+        v
+    bm25.build() / boolean_vsm.build() / custom_scorer.build()
+        |
+        v
+    retrieve()  ->  the ranking the harness scores
+
+The scorer `retrieve()` actually uses is selected by `_SCORER` below. All three
+required retrievers stay wired up and callable regardless of which one is
+selected, both because the assignment grades them as independent components
+(Section 9, "Correctness of required components") and because the report's
+comparison table needs to run all of them against the same index.
 """
-import json
 import os
 from typing import List, Optional, Tuple
 
+from submission import bm25, boolean_vsm, custom_scorer
 from submission.corpus_utils import load_corpus
-
-# TODO(you): once implemented, import and use your real scorers, e.g.:
-# from submission import bm25, boolean_vsm, custom_scorer
-# from submission.indexer import InvertedIndex
+from submission.indexer import InvertedIndex
 
 # ---------------------------------------------------------------------------
-# Module-level state. load_index() populates this; retrieve() reads it.
-# build_index() runs in a SEPARATE process and cannot rely on this state
-# surviving into load_index()/retrieve() — anything needed at query time
-# must be written to index_dir in build_index() and read back in
-# load_index().
+# Tuned parameters.
+#
+# These are the values selected by the sweep described in the report, run on
+# the released dev topics only — never on the held-out set, which we never see.
+# The environment-variable overrides exist so that sweep can vary them without
+# editing this file (and so a grader can reproduce a point on the curve); the
+# harness sets none of them, so grading always uses the defaults below.
 # ---------------------------------------------------------------------------
-_DOC_ORDER: Optional[List[str]] = None  # [doc_id, ...] in the order build_index() saw them
+_SCORER = os.environ.get("A1_SCORER", "custom")
+BM25_K1 = float(os.environ.get("A1_K1", "2.0"))
+BM25_B = float(os.environ.get("A1_B", "0.6"))
 
-_DOC_ORDER_FILENAME = "doc_order.json"  # TODO(you): replace with your real index files
+# The custom scorer wraps the same BM25, so it must use the same operating
+# point; setting it here keeps one source of truth for the tuned values.
+custom_scorer.K1 = BM25_K1
+custom_scorer.B = BM25_B
+
+_INDEX: Optional[InvertedIndex] = None
 
 
 def build_index(corpus_path: str, index_dir: str) -> None:
-    """Load the corpus, build whatever index structures you need, and
-    write everything retrieve() will need into `index_dir`.
+    """Analyse `corpus_path` and write a queryable index into `index_dir`.
 
-    Runs once, in its own process, before load_index() ever runs. Heavy
-    one-time work — tokenising the whole corpus, building postings lists,
-    computing collection statistics — belongs here, not in retrieve(), so
-    it doesn't get charged against your per-query latency. Whatever you
-    don't write to `index_dir` here does not exist as far as load_index()
-    is concerned.
+    Everything expensive lives here by design: this call is charged against the
+    index-build-time metric, while `retrieve()` is charged against per-query
+    latency, and per-query latency is measured once per query rather than once
+    per run. Anything that can be precomputed, is.
+
+    The corpus is streamed rather than materialised as a list — on a 190 MB
+    corpus.jsonl that is the difference between holding one document in memory
+    and holding all 171K.
     """
-    corpus = load_corpus(corpus_path)
-
-    # TODO(you): build your real inverted index / term statistics here, e.g.:
-    #
-    #   from submission.indexer import InvertedIndex
-    #   index = InvertedIndex()
-    #   index.build(corpus)
-    #   index.save(index_dir)          # <- persist it (see indexer.py)
-    #
-    # The trivial baseline below only persists doc_id order, which is all
-    # `_baseline_retrieve` needs.
     os.makedirs(index_dir, exist_ok=True)
-    doc_order = [doc_id for doc_id, _text in corpus]
-    with open(os.path.join(index_dir, _DOC_ORDER_FILENAME), "w", encoding="utf-8") as f:
-        json.dump(doc_order, f)
+
+    index = InvertedIndex()
+    index.build(_stream_corpus(corpus_path))
+    index.save(index_dir)
 
 
 def load_index(index_dir: str) -> None:
-    """Reconstruct everything retrieve() needs, reading only from
-    `index_dir`. Runs once, in a fresh process, before any retrieve()
-    calls — there is no leftover state from build_index() to rely on.
-    """
-    global _DOC_ORDER
+    """Reconstruct everything `retrieve()` needs, reading only `index_dir`.
 
-    # TODO(you): load your real index here, e.g.:
-    #
-    #   from submission.indexer import InvertedIndex
-    #   index = InvertedIndex.load(index_dir)
-    #   bm25.build(index)
-    #   boolean_vsm.build(index)
-    #
-    # and store it in a module-level variable so retrieve() can use it.
-    path = os.path.join(index_dir, _DOC_ORDER_FILENAME)
-    with open(path, encoding="utf-8") as f:
-        _DOC_ORDER = json.load(f)
+    Runs in a fresh process with no memory of `build_index()`. The postings
+    file is memory-mapped rather than read, so load time is the cost of the
+    dictionary and document table alone, and a query decodes only the postings
+    lists it actually touches.
+    """
+    global _INDEX
+    _INDEX = InvertedIndex.load(index_dir)
+
+    # Each scorer caches its own query-independent tables (IDF vectors, length
+    # ratios). None of them are persisted: they are derivable from the index,
+    # so writing them out would cost index-size score for nothing.
+    bm25.build(_INDEX)
+    boolean_vsm.build(_INDEX)
+    custom_scorer.build(_INDEX)
 
 
 def retrieve(query: str, k: int = 10) -> List[Tuple[str, float]]:
     """Return up to k (doc_id, score) pairs for `query`, best first."""
-    if _DOC_ORDER is None:
+    if _INDEX is None:
         raise RuntimeError(
             "retrieve() called before load_index(); the harness always "
             "calls build_index(corpus_path, index_dir) and then "
@@ -122,19 +119,26 @@ def retrieve(query: str, k: int = 10) -> List[Tuple[str, float]]:
             "manually, do the same."
         )
 
-    # TODO(you): replace this with a real scorer, e.g.:
-    #   return bm25.score(query, k, k1=1.2, b=0.75)
-    return _baseline_retrieve(query, k)
+    if _SCORER == "vsm":
+        return boolean_vsm.vsm_score(query, k)
+    if _SCORER == "custom":
+        return custom_scorer.score(query, k)
+    return bm25.score(query, k, k1=BM25_K1, b=BM25_B)
 
 
-# ---------------------------------------------------------------------------
-# Trivial reference baseline — DO NOT submit this as your final entry.
-# Ignores the query and returns the first k documents in the order
-# build_index() persisted them, with a dummy descending score. Enough to
-# exercise the full harness, including real disk persistence across a
-# fresh process; metrics against it will legitimately be close to zero.
-# ---------------------------------------------------------------------------
-def _baseline_retrieve(query: str, k: int) -> List[Tuple[str, float]]:
-    assert _DOC_ORDER is not None
-    top = _DOC_ORDER[:k]
-    return [(doc_id, float(len(top) - i)) for i, doc_id in enumerate(top)]
+def _stream_corpus(corpus_path: str):
+    """Yield (doc_id, text) pairs one at a time.
+
+    `corpus_utils.load_corpus()` returns the whole corpus as a list, which is
+    fine for the toy set and wasteful for the real one. The index only ever
+    needs one document at a time, so stream it.
+    """
+    import json
+
+    with open(corpus_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            yield obj["doc_id"], obj["text"]
