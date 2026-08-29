@@ -172,14 +172,15 @@ VByte-compressed postings, tuned BM25, and RM3 pseudo-relevance feedback.
 
 | Model | nDCG@10 | MAP@10 | MRR | P@10 | mean latency |
 |---|---|---|---|---|---|
-| Boolean AND (unranked, corpus order) | 0.1697 | 0.0026 | 0.3289 | 0.2100 | 3.8 ms |
-| VSM cosine, ltc.ltc | 0.3307 | 0.0073 | 0.5432 | 0.3760 | 10.1 ms |
-| BM25, textbook k1=1.2 b=0.75 | 0.6441 | 0.0157 | 0.8992 | 0.7020 | 3.6 ms |
-| BM25, tuned k1=2.0 b=0.6 | 0.6683 | 0.0170 | 0.9007 | 0.7400 | 3.6 ms |
-| **BM25 tuned + RM3 (the entry)** | **0.7387** | **0.0197** | **0.9333** | **0.8120** | 18.8 ms |
+| Boolean AND (unranked, corpus order) | 0.1697 | 0.0026 | 0.3289 | 0.2100 | 1.0 ms |
+| VSM cosine, ltc.ltc | 0.3307 | 0.0073 | 0.5432 | 0.3760 | 1.5 ms |
+| BM25, textbook k1=1.2 b=0.75 | 0.6441 | 0.0157 | 0.8992 | 0.7020 | 1.1 ms |
+| BM25, tuned k1=2.0 b=0.6 | 0.6683 | 0.0170 | 0.9007 | 0.7400 | 1.1 ms |
+| **BM25 tuned + RM3 (the entry)** | **0.7387** | **0.0197** | **0.9333** | **0.8120** | 4.1 ms |
 
-Efficiency: index build 12.0 s, index load 0.028 s, index size 39.7 MB
-(39,660,305 bytes), mean query latency 19.6 ms, peak build memory 1.25 GB.
+Efficiency: index build 13.8 s, index load 1.1 s, index size 19.5 MB
+(19,501,461 bytes), mean query latency 4.1 ms, peak memory 1.29 GB (build) /
+0.97 GB (query process).
 
 See `REPORT.md` for the design rationale, the parameter sweeps, the
 cross-validation that chose the RM3 settings, and the error analysis.
@@ -234,7 +235,7 @@ it across every parameter setting, so a full sweep costs one build.
 | File | What it does |
 |---|---|
 | `submission/retrieve.py` | The three harness entrypoints; selects the scorer and holds the tuned parameters |
-| `submission/indexer.py` | Text analysis, single-pass inversion, the on-disk format, the pruned forward index |
+| `submission/indexer.py` | Text analysis, single-pass inversion, the on-disk format (d-gaps + tf flag, chunked parallel LZMA), the pruned forward index |
 | `submission/codecs.py` | VByte integer coding, vectorised in both directions |
 | `submission/porter.py` | Porter (1980) stemmer, implemented from the published algorithm |
 | `submission/bm25.py` | BM25 with tunable k1/b, over plain or weighted queries |

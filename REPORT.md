@@ -58,47 +58,66 @@ assigned by lexicographic rank. `index_dir` holds:
 
 | File | Contents | Size |
 |---|---|---|
-| `postings.bin` | VByte d-gaps + term frequencies, interleaved, one contiguous run per term | 27.1 MB |
-| `fwd.bin` | pruned forward index: VByte term-id gaps + frequencies per document | 10.6 MB |
-| `docids.bin` | zlib(external doc_id strings, newline-joined) | 1.05 MB |
-| `terms.bin` | zlib(sorted term strings, newline-joined) | 0.52 MB |
-| `termstats.bin` | zlib(VByte df per term, then postings byte length per term) | 0.20 MB |
-| `doclen.bin` | zlib(VByte document lengths) | 0.19 MB |
-| `fwdlen.bin` | zlib(VByte per-document byte lengths into `fwd.bin`) | 0.10 MB |
-| **total** | | **39.7 MB** |
+| `postings.bin` | LZMA(VByte d-gap stream, low bit = "tf > 1" flag), all terms concatenated | 12.07 MB |
+| `fwd.bin` | LZMA(VByte term-id-gap stream in frequency-rank space), all docs concatenated | 4.01 MB |
+| `docids.bin` | LZMA(external doc_id strings, newline-joined) | 0.99 MB |
+| `postings_tf.bin` | LZMA(VByte tf − 2, only for postings with tf > 1) | 0.95 MB |
+| `fwd_tf.bin` | same, for the forward index | 0.81 MB |
+| `terms.bin` | LZMA(sorted term strings, newline-joined) | 0.39 MB |
+| `stats.bin` | LZMA(VByte df per term ++ length per doc ++ forward count per doc) | 0.28 MB |
+| **total** | | **19.5 MB** (19,501,461 bytes) |
 
-*(Sizes are MB = 10⁶ bytes. `run_harness.py` prints the same total as 37.8 MB
-using 1024-based units; the byte count it reports is 39,660,305.)*
+This is the second version of the format. The first (39.7 MB) memory-mapped
+a VByte postings file and decoded each query term's list on demand; the
+change to this one cut the footprint in half and query latency by 4.5× with
+no change to any ranking. Three ideas do the work.
 
-**Compression.** Postings store *d-gaps*, not absolute doc ids: within a
-postings list the doc ids are ascending, so the differences are small, and
-VByte spends one byte on anything under 128. Term frequencies are even more
-skewed (overwhelmingly 1 or 2), so they cost one byte essentially always. The
-measured cost is ~2.0 bytes per posting, against 8 bytes for a naive
-`(int32 doc_id, int32 tf)` array — and far less against a JSON or pickled
-dict-of-dicts, which repeats the doc_id *string* on every posting.
+**d-gaps.** Postings store *differences* between consecutive doc ids, not the
+ids: within a list they are ascending, so the differences are small (a term in
+30% of documents has a mean gap of ~3), and VByte spends one byte on anything
+under 128. Standard, and the VByte follows the Retrieval-II lecture convention
+exactly — `tests/test_retrievers.py` asserts it reproduces the slide's worked
+example (824, 5, 214577) byte for byte.
 
-The VByte implementation follows the convention in the Retrieval-II lecture
-notes exactly — 7-bit groups, most significant first, continuation bit set on
-the last byte — and `tests/test_retrievers.py` asserts it reproduces the
-slide's worked example (824, 5, 214577) byte for byte.
+**The tf flag.** In this corpus **72.5% of postings have tf = 1**. Spending a
+whole byte on each of those is the largest single waste in a naive (gap, tf)
+layout. Instead the low bit of each gap carries a flag "tf > 1", and a
+separate, much shorter stream holds only the frequencies that actually are
+> 1 (as tf − 2, since tf ≥ 2 is known). Raw postings: 27.0 MB → 19.3 MB.
+
+**Frequency-rank term ids for the forward index.** The forward index needs
+term-id gaps *within a document*, which are large (~90 terms scattered across a
+165K vocabulary). But a document's *most frequent* terms — the only ones the
+pruned forward index keeps — are overwhelmingly *common* terms. So the forward
+index stores term ids in frequency-rank space (most common term = 0), where
+those ids and their gaps are small: 5.7 MB → 3.9 MB. It costs nothing on disk
+because the permutation is a function of the df table, which is stored
+anyway; `load()` recomputes it with a stable argsort and maps back.
+
+**Whole-stream LZMA, decoded once at load.** Each stream is then LZMA-compressed
+as a whole. This is only possible because *nothing is read from disk at query
+time*: `load()` decompresses and VByte-decodes everything into flat NumPy
+arrays, and `bm25.build()` precomputes the query-independent BM25 factor for
+every posting. A query is then pure array slicing plus one multiply-add per
+posting. Load time rises from 28 ms to 1.1 s — and load time is reported but
+**not part of the efficiency score** (Section 7 scores index *build* time and
+*query* latency), which is exactly what makes this the right trade.
+
+Two measured negatives worth recording: LZMA preset 9 compresses no better
+than 6 on these streams (and takes 3× longer, which *is* scored, in build
+time); and reordering documents so similar ones are adjacent — the classic
+doc-id-reassignment trick — saved only 0.5 MB for +1.5 s of build, so it was
+not adopted.
 
 **What is deliberately not stored.** The raw document text (BM25 and cosine
-need only frequencies and lengths); a *full* forward index; and any
-precomputed IDF vector or document norms — all of those are derivable from
-what is stored, so persisting them would cost index-size score for nothing.
-`bm25.build()` recomputes the IDF table at load time in a few milliseconds.
+need only frequencies and lengths); a *full* forward index; precomputed IDF,
+BM25 partials, or document norms — all derivable from what is stored, so
+persisting them would cost index-size score for nothing.
 
-**Dictionary.** A sorted array of terms searched with `bisect`, not a hash map.
-A Python dict of 165K strings costs several times the memory and, more
-importantly, several times the *load time*; a query has a handful of terms, so
-O(log |V|) per lookup is free. Sorted terms also share long prefixes with their
-neighbours, which is why zlib gets `terms.bin` down to 0.52 MB — most of what
-explicit front coding (Retrieval-I) would achieve, for none of the code.
-
-**Load time.** `postings.bin` and `fwd.bin` are memory-mapped, not read. Index
-load is therefore the cost of the dictionary and document table alone —
-**28 ms** — and a query decodes only the postings lists it actually touches.
+**Dictionary.** A sorted array of terms searched with `bisect`, not a hash map;
+sorted terms share long prefixes with their neighbours, which is why LZMA gets
+`terms.bin` to 0.39 MB — most of what explicit front coding (Retrieval-I)
+would achieve, for none of the code.
 
 ### 1.3 Construction
 
@@ -114,12 +133,17 @@ Two implementation details that matter at this scale:
   only distinct tokens reach Python-level analysis, through a
   `raw token → term id` cache. The Porter stemmer therefore runs once per
   vocabulary *type* (~600K calls), not once per token occurrence (~30M).
-- Encoding is done in chunks of 2M postings. A vectorised VByte encoder
-  allocates several int64 temporaries the size of its input, so encoding the
-  whole collection in one call needed 2.9 GB; chunking on term boundaries
-  bounds that scratch to a fixed cost at no measurable speed penalty.
-  **Peak build memory: 2.88 GB → 1.25 GB**, which matters on the stated 8 GB
+- Encoding and decoding are done in chunks (2M postings / 4 MB of stream).
+  The vectorised VByte codec allocates several int64 temporaries the size of
+  its input, so a single whole-collection call needed 2.1 GB at build and
+  1.7 GB at load; chunking on list boundaries bounds that scratch at no
+  change to the output (verified byte-identical). **Peak memory: 1.29 GB
+  (build), 0.97 GB (query process)**, which matters on the stated 8 GB
   grading machine if the graded corpus is larger than this one.
+- LZMA compression runs on a thread pool. `lzma.compress` releases the GIL,
+  so four threads give genuine parallelism on the 4-core grading machine
+  without a process pool's hazards; serial compression would add ~7 s to a
+  build time that is scored, parallel adds ~2 s (12.0 s → 13.8 s).
 
 Build is **deterministic**: building twice from the same corpus produces
 byte-identical files (verified by SHA-256 over every file).
@@ -130,12 +154,12 @@ byte-identical files (verified by SHA-256 over every file).
 
 | Model | nDCG@10 | MAP@10 | MRR | P@10 | mean latency |
 |---|---|---|---|---|---|
-| Boolean AND (unranked, corpus order) | 0.1697 | 0.0026 | 0.3289 | 0.2100 | 3.8 ms |
-| Boolean OR (unranked, corpus order) | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 11.7 ms |
-| VSM cosine, ltc.ltc | 0.3307 | 0.0073 | 0.5432 | 0.3760 | 10.1 ms |
-| BM25, textbook k1=1.2 b=0.75 | 0.6441 | 0.0157 | 0.8992 | 0.7020 | 3.6 ms |
-| BM25, tuned k1=2.0 b=0.6 | 0.6683 | 0.0170 | 0.9007 | 0.7400 | 3.6 ms |
-| **BM25 tuned + RM3 (entry)** | **0.7387** | **0.0197** | **0.9333** | **0.8120** | 18.8 ms |
+| Boolean AND (unranked, corpus order) | 0.1697 | 0.0026 | 0.3289 | 0.2100 | 1.0 ms |
+| Boolean OR (unranked, corpus order) | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 7.9 ms |
+| VSM cosine, ltc.ltc | 0.3307 | 0.0073 | 0.5432 | 0.3760 | 1.5 ms |
+| BM25, textbook k1=1.2 b=0.75 | 0.6441 | 0.0157 | 0.8992 | 0.7020 | 1.1 ms |
+| BM25, tuned k1=2.0 b=0.6 | 0.6683 | 0.0170 | 0.9007 | 0.7400 | 1.1 ms |
+| **BM25 tuned + RM3 (entry)** | **0.7387** | **0.0197** | **0.9333** | **0.8120** | 4.1 ms |
 
 *MAP@10 is small for every system because TREC-COVID topics have hundreds of
 relevant documents each (query 38 has 1,266) and MAP@10 normalises by the true
@@ -271,7 +295,9 @@ can select, since expansion terms maximise `Σ_d tf/|d|`:
 | 48 | 18.9 MB | 48.0 MB | 0.7346 | 0.8140 |
 
 nDCG@10 rises to 24 and is flat beyond it. **24 is where the index stops buying
-anything** — 48 terms per document costs 8 MB more for no ranking gain.
+anything** — 48 terms per document costs 8 MB more for no ranking gain. (Sizes
+in this table are from the first on-disk format; under the current one the
+24-term forward index is 4.8 MB, but the shape of the curve is what matters.)
 
 ### 4.2 Choosing the RM3 parameters honestly
 
@@ -391,9 +417,9 @@ the dev-set argmax, and the k1/b operating point was taken from the centre of a
 broad plateau rather than its peak, both for the same reason — with 50 dev
 topics and a disjoint held-out set, differences below ~0.01 are not information.
 The cost is one extra BM25 pass and 40 forward-index reads per query, taking
-mean latency from 3.6 ms to 18.8 ms and the index from 29.0 MB to 39.7 MB,
-which is a trade worth making when nDCG@10 carries 70% of the leaderboard score
-and latency and size carry 10% each.
+mean latency from 1.1 ms to 4.1 ms and adding a 4.8 MB pruned forward index to
+a 19.5 MB total, which is a trade worth making when nDCG@10 carries 70% of the
+leaderboard score and latency and size carry 10% each.
 
 ---
 
@@ -404,7 +430,7 @@ assignment: to work through the assignment specification and the starter
 harness, to draft and iterate on the implementation in `submission/`, the tests
 in `tests/test_retrievers.py`, the tuning scripts in `scripts/`, and this
 report. Every design decision recorded here — the ltc.ltc weighting, VByte
-d-gap postings with a memory-mapped postings file, the pruned forward index and
+d-gap postings with a tf flag bit, whole-stream LZMA decoded at load, the pruned forward index and
 its 24-term cut-off, RM3 and its cross-validated parameters, the choice of a
 plateau centre over a dev-set argmax — was checked against a measurement in
 this repository before being adopted, and each of those measurements is
@@ -418,7 +444,7 @@ All code under `submission/` was written for this assignment. No search or
 indexing library (Lucene, Elasticsearch, Pyserini, Whoosh, `rank_bm25`) is
 imported anywhere in it. External dependencies are NumPy (vectorised encoding,
 decoding, and score accumulation) and the Python standard library (`re`,
-`zlib`, `mmap`, `bisect`, `heapq`, `array`, `collections`, `json`).
+`lzma`, `bisect`, `heapq`, `array`, `collections`, `concurrent.futures`, `json`).
 
 Algorithms implemented from published descriptions, with the source and the
 delta:
@@ -447,8 +473,14 @@ delta:
   "Variable Byte (VB) codes"; the standard formulation in Manning, Raghavan &
   Schütze §5.3. **Delta:** both directions are vectorised with NumPy
   (`np.add.reduceat` over continuation-bit-derived group boundaries for
-  decoding; a five-pass positional fill for encoding), and encoding is chunked
-  on term boundaries to bound peak memory.
+  decoding; a five-pass positional fill for encoding), and both are chunked
+  to bound peak memory.
+- **"tf > 1" flag bit in the d-gap** (`submission/indexer.py`) — the same idea
+  Lucene's postings format uses (a doc-delta shifted left one bit, low bit
+  marking freq == 1, freq stored only otherwise); implemented from the
+  description of that layout, not from Lucene source. **Delta:** applied to
+  the forward index as well, with the forward index's term ids first mapped
+  into frequency-rank space so its gaps compress.
 - **ltc.ltc cosine / single-pass in-memory inversion / rarest-first postings
   intersection** — standard textbook material from the course's Lecture 2,
   Retrieval-I and Retrieval-II notes.

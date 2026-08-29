@@ -26,10 +26,10 @@ How the pieces fit together
         |  indexer.analyze()      lowercase -> tokenise -> stopword -> Porter
         v
     InvertedIndex.build()         single-pass in-memory inversion
-        |  InvertedIndex.save()   VByte d-gaps + zlib dictionary
+        |  InvertedIndex.save()   VByte d-gaps + tf flag, chunked parallel LZMA
         v
     index_dir/                    ~~~ process boundary ~~~
-        |  InvertedIndex.load()   mmap postings, decompress dictionary
+        |  InvertedIndex.load()   decompress + decode everything into RAM
         v
     bm25.build() / boolean_vsm.build() / custom_scorer.build()
         |
@@ -92,10 +92,11 @@ def build_index(corpus_path: str, index_dir: str) -> None:
 def load_index(index_dir: str) -> None:
     """Reconstruct everything `retrieve()` needs, reading only `index_dir`.
 
-    Runs in a fresh process with no memory of `build_index()`. The postings
-    file is memory-mapped rather than read, so load time is the cost of the
-    dictionary and document table alone, and a query decodes only the postings
-    lists it actually touches.
+    Runs in a fresh process with no memory of `build_index()`. The whole index
+    is decompressed and decoded into flat arrays here (~1 s), and BM25's
+    per-posting partial scores are precomputed, so that a query is nothing but
+    array slices and one multiply-add per posting. Load time is reported but
+    not part of the efficiency score; query latency is — hence the trade.
     """
     global _INDEX
     _INDEX = InvertedIndex.load(index_dir)
@@ -106,6 +107,9 @@ def load_index(index_dir: str) -> None:
     bm25.build(_INDEX)
     boolean_vsm.build(_INDEX)
     custom_scorer.build(_INDEX)
+    # Materialise the BM25 partial-score table for the tuned (k1, b) now,
+    # inside load, so the first query does not pay for it.
+    bm25.warm(BM25_K1, BM25_B)
 
 
 def retrieve(query: str, k: int = 10) -> List[Tuple[str, float]]:

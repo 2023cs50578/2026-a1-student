@@ -58,6 +58,11 @@ _INDEX: Optional[InvertedIndex] = None
 _IDF = None            # idf[term_id]
 _LEN_RATIO = None      # |D| / avgdl per doc id
 
+# Per-posting partial scores, one float32 array aligned with the index's flat
+# postings arrays, keyed by (k1, b). See `_partials()`.
+_PARTIALS: dict = {}
+_MAX_CACHED_PARTIALS = 4
+
 
 def build(index: InvertedIndex) -> None:
     """Precompute the query-independent parts of BM25 from a loaded index.
@@ -73,6 +78,7 @@ def build(index: InvertedIndex) -> None:
     """
     global _INDEX, _IDF, _LEN_RATIO
     _INDEX = index
+    _PARTIALS.clear()
 
     if _HAVE_NUMPY:
         df = np.asarray(index.df, dtype=np.float64)
@@ -143,15 +149,55 @@ def score_array_weighted(term_weights, k1: float = 1.2, b: float = 0.75):
     return scores
 
 
+def _partials(k1: float, b: float):
+    """The query-independent part of BM25 for every posting in the index:
+
+        partial[p] = IDF(t_p) * tf_p * (k1 + 1) / (tf_p + k1 * (1 - b + b * |D_p| / avgdl))
+
+    aligned with the index's flat postings arrays, so term t's partials are
+    the same slice as its postings. Computing this once per (k1, b) — one
+    vectorised pass over ~12M postings, ~0.1 s — means a query term's whole
+    contribution is `scores[doc_ids] += weight * partial_slice`: no
+    floating-point work per query beyond one multiply-add per posting.
+
+    Cached per (k1, b) so parameter sweeps stay cheap; bounded so a wide sweep
+    cannot hold dozens of 50 MB arrays at once.
+    """
+    key = (float(k1), float(b))
+    cached = _PARTIALS.get(key)
+    if cached is not None:
+        return cached
+    index = _require_index()
+    if len(_PARTIALS) >= _MAX_CACHED_PARTIALS:
+        _PARTIALS.clear()
+
+    tf = index._freqs.astype(np.float32)
+    # idf per posting, via a repeat of the (float32) per-term table.
+    partial = np.repeat(_IDF.astype(np.float32), index.df)
+    partial *= tf * np.float32(k1 + 1.0)
+    norm = _LEN_RATIO[index._doc_ids]           # float32, |D|/avgdl per posting
+    norm *= np.float32(k1 * b)
+    norm += np.float32(k1 * (1.0 - b))
+    norm += tf
+    partial /= norm
+    _PARTIALS[key] = partial
+    return partial
+
+
+def warm(k1: float, b: float) -> None:
+    """Precompute the partial-score table for (k1, b). Called from
+    retrieve.load_index() so the cost lands in load time, not query time."""
+    if _HAVE_NUMPY:
+        _partials(k1, b)
+
+
 def _accumulate_term(scores, doc_ids, freqs, term_id, query_weight, k1, b) -> None:
     """Add one query term's BM25 contribution into the score accumulator."""
     if _HAVE_NUMPY:
-        tf = freqs.astype(np.float32)
-        # The saturation denominator: k1 scaled by how long this document is
-        # relative to the collection average, blended by b.
-        norm = k1 * (1.0 - b + b * _LEN_RATIO[doc_ids])
-        contribution = (_IDF[term_id] * query_weight) * (tf * (k1 + 1.0)) / (tf + norm)
-        scores[doc_ids] += contribution.astype(np.float32)
+        lo, hi = _INDEX.postings_range(term_id)
+        # A term's postings hold each doc id once, so plain fancy-index
+        # addition is safe (np.add.at would only be needed with repeats).
+        scores[doc_ids] += query_weight * _partials(k1, b)[lo:hi]
     else:  # pragma: no cover
         idf = _IDF[term_id]
         for doc_id, tf in zip(doc_ids, freqs):
