@@ -167,6 +167,10 @@ conformance freeze (48 hours before the deadline — see
 An inverted-index retriever built from scratch: Porter stemming, stopwording,
 VByte-compressed postings, tuned BM25, and RM3 pseudo-relevance feedback.
 
+**The entry is plain BM25, k1 = 1.5, b = 0.75.** It was chosen for
+robustness across five collections, not for the best score on any one of them
+— see below.
+
 **Results on the released dev topics** (`beir/trec-covid`, 171,332 documents,
 50 topics), measured by `harness/run_harness.py`:
 
@@ -175,12 +179,29 @@ VByte-compressed postings, tuned BM25, and RM3 pseudo-relevance feedback.
 | Boolean AND (unranked, corpus order) | 0.1697 | 0.0026 | 0.3289 | 0.2100 | 1.0 ms |
 | VSM cosine, ltc.ltc | 0.3307 | 0.0073 | 0.5432 | 0.3760 | 1.5 ms |
 | BM25, textbook k1=1.2 b=0.75 | 0.6441 | 0.0157 | 0.8992 | 0.7020 | 1.1 ms |
-| BM25, tuned k1=2.0 b=0.6 | 0.6683 | 0.0170 | 0.9007 | 0.7400 | 1.1 ms |
-| **BM25 tuned + RM3 (the entry)** | **0.7387** | **0.0197** | **0.9333** | **0.8120** | 4.1 ms |
+| **BM25, k1=1.5 b=0.75 (the entry)** | **0.6481** | **0.0162** | — | **0.7020** | **1.1 ms** |
+| BM25 k1=2.0 b=0.6 + RM3 (dev-tuned, *not* shipped) | 0.7387 | 0.0197 | 0.9333 | 0.8120 | 4.1 ms |
 
-Efficiency: index build 13.8 s, index load 1.1 s, index size 19.5 MB
-(19,501,461 bytes), mean query latency 4.1 ms, peak memory 1.29 GB (build) /
-0.97 GB (query process).
+Efficiency of the entry: index build 12.0 s, index load 0.84 s, index size
+14.0 MB (14,649,180 bytes), mean query latency 1.1 ms.
+
+**Why not ship the 0.7387 system?** Because it only wins on TREC-COVID.
+`scripts/cross_dataset.py` scores every candidate on four unrelated public
+collections (nfcorpus, scifact, fiqa, arguana) with the same harness metrics:
+
+| Configuration | mean nDCG@10 over 4 proxies | worst proxy | TREC-COVID |
+|---|---|---|---|
+| **BM25 k1=1.5 b=0.75** | **0.4116** | **0.2524** | 0.6481 |
+| BM25 k1=1.2 b=0.75 | 0.4099 | 0.2558 | 0.6441 |
+| BM25 k1=2.0 b=0.6 | 0.4041 | 0.2479 | 0.6683 |
+| BM25(2.0,0.6) + RM3 40/30/0.4 | 0.3725 (last of 10) | 0.1964 | 0.7387 |
+
+The dev-tuned RM3 system is first on the dev set and last everywhere else.
+The private leaderboard is scored on a collection we never see; a
+configuration that generalises across five corpora is the better bet for a
+sixth. RM3 stays in the code (`A1_RM3=1` re-enables it, and rebuilds the
+forward index it needs) because it is the right tool when queries have many
+relevant documents — it just is not the right default.
 
 See `REPORT.md` for the design rationale, the parameter sweeps, the
 cross-validation that chose the RM3 settings, and the error analysis.
@@ -221,7 +242,13 @@ checked rather than taken on trust.
 python scripts/sweep_params.py --sweep k1,b,grid,models
 
 # RM3 parameters by 5-fold cross-validation over the dev topics.
-python scripts/tune_rm3.py
+A1_RM3=1 python scripts/tune_rm3.py
+
+# Robustness check across public BEIR collections (downloads ~100 MB):
+for d in nfcorpus/test scifact/test fiqa/test arguana; do
+  python scripts/download_full_corpus.py --dataset beir/$d --out data/proxy/${d%%/*}
+done
+python scripts/cross_dataset.py --include-dev
 
 # Per-query diagnostics: where the system fails and what RM3 added.
 python scripts/error_analysis.py --worst 5
@@ -240,7 +267,7 @@ it across every parameter setting, so a full sweep costs one build.
 | `submission/porter.py` | Porter (1980) stemmer, implemented from the published algorithm |
 | `submission/bm25.py` | BM25 with tunable k1/b, over plain or weighted queries |
 | `submission/boolean_vsm.py` | Boolean AND/OR, and ltc.ltc cosine ranking |
-| `submission/custom_scorer.py` | The competition entry: BM25 + RM3 relevance feedback |
+| `submission/custom_scorer.py` | BM25 + optional RM3 relevance feedback (off by default; see above) |
 
 ## Getting help
 

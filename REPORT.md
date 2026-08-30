@@ -344,6 +344,69 @@ collection containing a term in >60% of documents.
 
 ---
 
+### 4.4 Cross-dataset validation — and why RM3 is not the entry
+
+Everything above tunes on the released dev topics, with cross-validation to
+avoid fitting noise *within* them. That protects against one kind of
+overfitting. It does nothing about the other kind: fitting the *collection*.
+TREC-COVID has ~500 relevant documents per topic and long biomedical
+abstracts; every choice above was made in that regime.
+
+
+So the candidates were re-scored on four unrelated public collections
+(`scripts/cross_dataset.py`), chosen to span the space the private set could
+occupy — from many relevant documents per query to exactly one:
+
+| Collection | docs | queries | relevant/query | domain |
+|---|---|---|---|---|
+| nfcorpus | 3,633 | 323 | 38 | nutrition / medical |
+| scifact | 5,183 | 300 | 1.1 | scientific claims |
+| fiqa | 57,638 | 648 | 2.6 | financial Q&A |
+| arguana | 8,674 | 1,406 | 1.0 | debate arguments |
+
+| Configuration | nfcorpus | scifact | fiqa | arguana | **mean** | **worst** | TREC-COVID |
+|---|---|---|---|---|---|---|---|
+| **BM25 k1=1.5 b=0.75** | 0.3321 | 0.6934 | 0.2524 | 0.3684 | **0.4116** | 0.2524 | 0.6481 |
+| BM25 k1=1.2 b=0.75 | 0.3303 | 0.6885 | 0.2558 | 0.3647 | 0.4099 | **0.2558** | 0.6441 |
+| BM25(1.2,0.75)+RM3 10/20/0.6 | 0.3474 | 0.6815 | 0.2364 | 0.3741 | 0.4098 | 0.2364 | 0.6643 |
+| BM25 k1=2.0 b=0.6 | 0.3322 | 0.6861 | 0.2479 | 0.3504 | 0.4041 | 0.2479 | 0.6683 |
+| BM25(2.0,0.6)+RM3 10/20/0.6 | 0.3512 | 0.6743 | 0.2284 | 0.3436 | 0.3994 | 0.2284 | 0.6818 |
+| BM25 k1=0.9 b=0.4 | 0.3284 | 0.6793 | 0.2478 | 0.3151 | 0.3927 | 0.2478 | 0.6232 |
+| BM25(1.2,0.75)+RM3 10/10/0.5 | 0.3503 | 0.6492 | 0.2152 | 0.3507 | 0.3914 | 0.2152 | 0.6712 |
+| BM25(1.2,0.75)+RM3 40/30/0.4 | 0.3482 | 0.6443 | 0.2142 | 0.3417 | 0.3871 | 0.2142 | 0.7206 |
+| BM25(2.0,0.6)+RM3 10/10/0.5 | 0.3498 | 0.6313 | 0.2062 | 0.3215 | 0.3772 | 0.2062 | 0.6913 |
+| BM25(2.0,0.6)+RM3 40/30/0.4 | 0.3491 | 0.6386 | 0.1964 | 0.3057 | 0.3725 | 0.1964 | **0.7387** |
+
+The dev-tuned system is **first on TREC-COVID and last on every other
+collection**. The pattern is exactly the mechanism §4 describes: RM3 treats
+the top `FB_DOCS` documents as relevant. With 500 relevant documents per
+topic that is a good assumption and the expansion is worth +0.07. With one to
+three relevant documents per query the top 40 are mostly *wrong*, the
+relevance model is built from the wrong vocabulary, and the query drifts —
+costing 0.05–0.06 nDCG@10 on scifact, fiqa and arguana. Even the conservative
+RM3 settings (10 documents, 10–20 terms, α = 0.5–0.6) hurt on the
+few-relevant collections. nfcorpus, the one proxy with many relevant
+documents per query, is the only one where RM3 helps, which is the
+confirming case.
+
+The BM25 parameters tell the same story more quietly: (2.0, 0.6) is best on
+TREC-COVID and third of four on the proxies; (1.5, 0.75) is best on average
+and best in the worst case. The textbook values were not the ones to "beat"
+after all — they were the robust ones.
+
+**The entry is therefore plain BM25 at k1 = 1.5, b = 0.75, RM3 off.** That
+gives up 0.09 nDCG@10 on the dev set, where it will never be scored, to gain
+an expected 0.04 on collections like the one it will be. It also drops the
+forward index (14.0 MB total, 1.1 ms per query). RM3 remains in the code,
+tested, and switchable (`A1_RM3=1`), because it is the right tool in the
+regime it was built for.
+
+This is the assignment's fifth learning objective observed first-hand:
+"how leaderboard-driven tuning can overfit to a public dev set — and why a
+held-out private evaluation set exists."
+
+---
+
 ## 5. Error analysis
 
 `scripts/error_analysis.py`. Five worst dev topics under the final system:
@@ -403,23 +466,21 @@ is homogeneous.
 
 ## 6. Final competition entry — one paragraph
 
-The entry is **BM25 (k1 = 2.0, b = 0.6) followed by RM3 pseudo-relevance
-feedback (40 feedback documents, 30 expansion terms, α = 0.4)**, over an index
-with Porter stemming, a short stopword list, VByte-compressed d-gap postings,
-and a forward index pruned to each document's 24 most frequent terms. BM25 was
-chosen over the vector-space model because it beats it by a factor of two on
-the same index (0.6683 vs 0.3307), and the reason is specifically that its
-length normalisation is *tunable* where cosine's is fixed. RM3 was added
-because it is the only change tested that produced a gain larger than the noise
-floor of 50 topics: +0.048 nDCG@10 under 5-fold cross-validation, improving
-every fold. Its parameters were chosen by that cross-validation rather than by
-the dev-set argmax, and the k1/b operating point was taken from the centre of a
-broad plateau rather than its peak, both for the same reason — with 50 dev
-topics and a disjoint held-out set, differences below ~0.01 are not information.
-The cost is one extra BM25 pass and 40 forward-index reads per query, taking
-mean latency from 1.1 ms to 4.1 ms and adding a 4.8 MB pruned forward index to
-a 19.5 MB total, which is a trade worth making when nDCG@10 carries 70% of the
-leaderboard score and latency and size carry 10% each.
+The entry is **plain BM25 with k1 = 1.5 and b = 0.75**, over an index with
+Porter stemming, a short stopword list, and VByte d-gap postings with a
+tf-flag bit, LZMA-compressed on disk and decoded once at load (14.0 MB,
+1.1 ms per query on TREC-COVID). It is not the system that scores best on
+the dev set: BM25 (2.0, 0.6) with RM3 feedback reaches 0.7387 there against
+this entry's 0.6481. It was chosen because it is the configuration that
+scores best *on average and in the worst case* across five collections —
+TREC-COVID plus four unrelated public corpora spanning one to five hundred
+relevant documents per query — while the dev-set winner is last on every
+collection but the one it was tuned on. The private leaderboard confirmed the
+regime: nDCG ≈ 0.2 and MAP ≈ 0.1 for the whole class means few relevant
+documents per query, which is exactly where pseudo-relevance feedback drifts.
+Boolean and VSM were rejected as the entry for the reasons in §2. RM3 stays
+implemented and switchable, and the k1/b sweep, the RM3 cross-validation and
+the cross-dataset table are all reproducible from `scripts/`.
 
 ---
 
