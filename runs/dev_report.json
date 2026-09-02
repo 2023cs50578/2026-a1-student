@@ -4,15 +4,15 @@
   "num_queries_scored": 6,
   "skipped_no_qrels": [],
   "aggregate_metrics": {
-    "ndcg@10": 0.8825565751724885,
-    "map@10": 0.8250000000000001,
+    "ndcg@10": 0.9118919747585624,
+    "map@10": 0.8916666666666666,
     "mrr": 1.0,
-    "p@10": 0.3166666666666667
+    "p@10": 0.3666666666666667
   },
   "leaderboard": {
-    "ndcg@10": 0.8825565751724885,
-    "map@10": 0.8250000000000001,
-    "provisional_score_80pct": 0.7002896026207419,
+    "ndcg@10": 0.9118919747585624,
+    "map@10": 0.8916666666666666,
+    "provisional_score_80pct": 0.7274910489976603,
     "note": "This is nDCG@10 and MAP@10 combined at their 70%/10% weights (80% of the total). The remaining \u00b110% efficiency modifier and 0-10% index-size score are both computed relative to the whole class and are applied when course staff aggregate the real leaderboard.",
     "baseline_ndcg@10": 0.862480709374298,
     "baseline_map@10": 0.6836309523809524,
@@ -20,11 +20,11 @@
     "beats_baseline_map@10": true
   },
   "efficiency": {
-    "index_build_seconds": 0.01908591599931242,
-    "index_load_seconds": 0.0008175830007530749,
+    "index_build_seconds": 0.014198499993653968,
+    "index_load_seconds": 0.00046016700798645616,
     "index_size_bytes": 1366,
-    "mean_query_latency_seconds": 5.2646165083084874e-05,
-    "max_query_latency_seconds": 8.004199480637908e-05
+    "mean_query_latency_seconds": 3.306950141753381e-05,
+    "max_query_latency_seconds": 5.612500535789877e-05
   },
   "per_query_metrics": {
     "q1": {
@@ -32,42 +32,42 @@
       "map@10": 1.0,
       "mrr": 1.0,
       "p@10": 0.4,
-      "num_ranked": 4
+      "num_ranked": 10
     },
     "q2": {
-      "ndcg@10": 0.9677327793493801,
-      "map@10": 0.75,
+      "ndcg@10": 0.9967166296573448,
+      "map@10": 0.95,
       "mrr": 1.0,
-      "p@10": 0.3,
-      "num_ranked": 4
+      "p@10": 0.4,
+      "num_ranked": 10
     },
     "q3": {
       "ndcg@10": 0.929598662369832,
       "map@10": 1.0,
       "mrr": 1.0,
       "p@10": 0.4,
-      "num_ranked": 4
+      "num_ranked": 10
     },
     "q4": {
       "ndcg@10": 1.0,
       "map@10": 1.0,
       "mrr": 1.0,
       "p@10": 0.4,
-      "num_ranked": 4
+      "num_ranked": 10
     },
     "q5": {
-      "ndcg@10": 0.6244247138302588,
-      "map@10": 0.2,
+      "ndcg@10": 0.7714532610387369,
+      "map@10": 0.4,
       "mrr": 1.0,
-      "p@10": 0.1,
-      "num_ranked": 1
+      "p@10": 0.3,
+      "num_ranked": 10
     },
     "q6": {
       "ndcg@10": 0.8428282648809379,
       "map@10": 1.0,
       "mrr": 1.0,
       "p@10": 0.3,
-      "num_ranked": 3
+      "num_ranked": 10
     }
   }
 }
