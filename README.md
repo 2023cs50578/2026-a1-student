@@ -167,7 +167,8 @@ conformance freeze (48 hours before the deadline — see
 An inverted-index retriever built from scratch: Porter stemming, stopwording,
 VByte-compressed postings, tuned BM25, and RM3 pseudo-relevance feedback.
 
-**The entry is plain BM25, k1 = 1.5, b = 0.75.** It was chosen for
+**The entry is plain BM25, k1 = 1.5, b = 0.75, with the document's opening
+sentence (≈ its title in this corpus format) counted twice at indexing time.** It was chosen for
 robustness across five collections, not for the best score on any one of them
 — see below.
 
@@ -179,11 +180,13 @@ robustness across five collections, not for the best score on any one of them
 | Boolean AND (unranked, corpus order) | 0.1697 | 0.0026 | 0.3289 | 0.2100 | 1.0 ms |
 | VSM cosine, ltc.ltc | 0.3307 | 0.0073 | 0.5432 | 0.3760 | 1.5 ms |
 | BM25, textbook k1=1.2 b=0.75 | 0.6441 | 0.0157 | 0.8992 | 0.7020 | 1.1 ms |
-| **BM25, k1=1.5 b=0.75 (the entry)** | **0.6481** | **0.0162** | — | **0.7020** | **1.1 ms** |
+| BM25, k1=1.5 b=0.75 | 0.6481 | 0.0162 | — | 0.7020 | 1.1 ms |
+| **+ title ×2 (the entry)** | **0.6528** | **0.0162** | — | — | **1.1 ms** |
 | BM25 k1=2.0 b=0.6 + RM3 (dev-tuned, *not* shipped) | 0.7387 | 0.0197 | 0.9333 | 0.8120 | 4.1 ms |
 
-Efficiency of the entry: index build 12.0 s, index load 0.84 s, index size
-14.0 MB (14,649,180 bytes), mean query latency 1.1 ms.
+Efficiency of the entry: index build 7.0 s (corpus tokenised on 4 worker
+processes; byte-identical to the serial build), index load 0.84 s, index size
+14.5 MB (15,156,496 bytes), mean query latency 1.1 ms.
 
 **Why not ship the 0.7387 system?** Because it only wins on TREC-COVID.
 `scripts/cross_dataset.py` scores every candidate on four unrelated public
@@ -191,7 +194,8 @@ collections (nfcorpus, scifact, fiqa, arguana) with the same harness metrics:
 
 | Configuration | mean nDCG@10 over 4 proxies | worst proxy | TREC-COVID |
 |---|---|---|---|
-| **BM25 k1=1.5 b=0.75** | **0.4116** | **0.2524** | 0.6481 |
+| **BM25 k1=1.5 b=0.75 + title ×2** | **0.4161** | **0.2615** | **0.6528** |
+| BM25 k1=1.5 b=0.75 | 0.4116 | 0.2524 | 0.6481 |
 | BM25 k1=1.2 b=0.75 | 0.4099 | 0.2558 | 0.6441 |
 | BM25 k1=2.0 b=0.6 | 0.4041 | 0.2479 | 0.6683 |
 | BM25(2.0,0.6) + RM3 40/30/0.4 | 0.3725 (last of 10) | 0.1964 | 0.7387 |

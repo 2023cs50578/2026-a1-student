@@ -78,6 +78,13 @@ ENABLE_RM3 = os.environ.get("A1_RM3", "0") == "1"
 # The forward index exists only to serve RM3; without it, don't build it.
 FORWARD_TERMS_PER_DOC = 24 if ENABLE_RM3 else 0
 
+# Count each document's opening sentence (~its title, in this corpus format)
+# twice. The only cross-dataset change that improved nDCG@10 on all five
+# collections tested (see the report's cross-dataset section): title terms
+# are disproportionately what queries ask about, and repeating them is the
+# one way to tell a position-blind BM25 so. Costs ~4% index size.
+TITLE_BOOST = int(os.environ.get("A1_TITLE_BOOST", "2"))
+
 # The custom scorer wraps the same BM25, so it must use the same operating
 # point; setting it here keeps one source of truth for the tuned values.
 custom_scorer.K1 = BM25_K1
@@ -102,7 +109,11 @@ def build_index(corpus_path: str, index_dir: str) -> None:
     os.makedirs(index_dir, exist_ok=True)
 
     index = InvertedIndex()
-    index.build(_stream_corpus(corpus_path), forward_terms_per_doc=FORWARD_TERMS_PER_DOC)
+    # Parallel sweep: tokenisation is two thirds of build time and the grading
+    # machine has 4 cores; build_from_file() splits the corpus by byte range
+    # and produces a byte-identical index to the serial path.
+    index.build_from_file(corpus_path, forward_terms_per_doc=FORWARD_TERMS_PER_DOC,
+                          title_boost=TITLE_BOOST)
     index.save(index_dir)
 
 

@@ -120,6 +120,27 @@ from submission import codecs
 from submission.porter import stem as porter_stem
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_SENTENCE_END = re.compile(r"[.!?\n]")
+
+
+def boost_title(text: str, boost: int) -> str:
+    """Repeat a document's opening span so its terms count `boost` times.
+
+    The corpus format stores each document as its title followed by its body,
+    so the text up to the first sentence boundary is (approximately) the
+    title. Title words are disproportionately what queries ask about, and
+    BM25 has no notion of position — the only way to tell it "this part
+    matters more" is to raise those terms' frequencies. Measured on five
+    collections, counting the opening sentence twice improves nDCG@10 on
+    every one of them (report, cross-dataset section).
+    """
+    if boost <= 1:
+        return text
+    match = _SENTENCE_END.search(text)
+    title = text[: match.start()] if match else text[:120]
+    if not title:
+        return text
+    return text + (" " + title) * (boost - 1)
 
 # A conservative English stopword list. These are the words Zipf's law makes
 # ubiquitous (Lecture 2, "Stopwords") — they carry almost no discriminative
@@ -193,6 +214,94 @@ def analyze(text: str, remove_stopwords: bool = True, stemming: bool = True) -> 
     return terms
 
 
+def _corpus_chunks(path: str, n_chunks: int):
+    """Split a JSONL file into byte ranges on line boundaries."""
+    total = os.path.getsize(path)
+    bounds = [0]
+    with open(path, "rb") as f:
+        for i in range(1, n_chunks):
+            f.seek(total * i // n_chunks)
+            f.readline()  # skip to the end of the current line
+            bounds.append(f.tell())
+    bounds.append(total)
+    return [(lo, hi) for lo, hi in zip(bounds, bounds[1:]) if hi > lo]
+
+
+def _sweep_chunk(args):
+    """Tokenise one byte range of the corpus. Runs in a worker process.
+
+    Returns everything build needs, with term ids in a chunk-LOCAL first-seen
+    numbering plus the local vocabulary to translate them; the parent remaps
+    every chunk onto one global lexicographic numbering, so the merged result
+    is identical to a serial sweep.
+    """
+    path, lo, hi, remove_stopwords, stemming, forward_terms_per_doc, title_boost = args
+    from array import array
+    from heapq import nlargest
+    from operator import itemgetter
+
+    term_to_id: Dict[str, int] = {}
+    token_cache: Dict[str, int] = {}
+    posting_terms = array("i"); posting_docs = array("i"); posting_freqs = array("i")
+    fwd_terms = array("i"); fwd_freqs = array("i"); fwd_counts = array("i")
+    doc_ids: List[str] = []; doc_len: List[int] = []
+
+    with open(path, "rb") as f:
+        f.seek(lo)
+        local_doc = 0
+        while f.tell() < hi:
+            line = f.readline()
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            text = obj["text"]
+            if title_boost > 1:
+                text = boost_title(text, title_boost)
+
+            raw_counts = Counter(_TOKEN_RE.findall(text.lower()))
+            doc_counts: Dict[int, int] = {}
+            for token, count in raw_counts.items():
+                term_id = token_cache.get(token, -2)
+                if term_id == -2:
+                    if remove_stopwords and token in _STOPWORDS:
+                        term_id = -1
+                    else:
+                        term = porter_stem(token) if stemming else token
+                        term_id = term_to_id.get(term)
+                        if term_id is None:
+                            term_id = len(term_to_id)
+                            term_to_id[term] = term_id
+                    token_cache[token] = term_id
+                if term_id < 0:
+                    continue
+                doc_counts[term_id] = doc_counts.get(term_id, 0) + count
+
+            posting_terms.extend(doc_counts.keys())
+            posting_freqs.extend(doc_counts.values())
+            posting_docs.extend([local_doc] * len(doc_counts))
+
+            if forward_terms_per_doc:
+                if len(doc_counts) > forward_terms_per_doc:
+                    kept = nlargest(forward_terms_per_doc, doc_counts.items(), key=itemgetter(1))
+                    kept.sort()
+                else:
+                    kept = sorted(doc_counts.items())
+                fwd_terms.extend(t for t, _f in kept)
+                fwd_freqs.extend(f for _t, f in kept)
+                fwd_counts.append(len(kept))
+
+            doc_ids.append(obj["doc_id"])
+            doc_len.append(sum(doc_counts.values()))
+            local_doc += 1
+
+    vocab = [None] * len(term_to_id)
+    for term, tid in term_to_id.items():
+        vocab[tid] = term
+    return (doc_ids, doc_len, vocab,
+            posting_terms.tobytes(), posting_docs.tobytes(), posting_freqs.tobytes(),
+            fwd_terms.tobytes(), fwd_freqs.tobytes(), fwd_counts.tobytes())
+
+
 class InvertedIndex:
     """An inverted index held as flat NumPy arrays, with a pruned forward
     index alongside it.
@@ -233,6 +342,7 @@ class InvertedIndex:
         remove_stopwords: bool = True,
         stemming: bool = True,
         forward_terms_per_doc: int = DEFAULT_FORWARD_TERMS_PER_DOC,
+        title_boost: int = 1,
     ) -> None:
         """Build the index from an iterable of (doc_id, text) pairs.
 
@@ -275,6 +385,8 @@ class InvertedIndex:
         doc_len: List[int] = []
 
         for internal_id, (external_id, text) in enumerate(corpus):
+            if title_boost > 1:
+                text = boost_title(text, title_boost)
             # Counting raw tokens first keeps the hot loop in C: only the
             # distinct tokens of a document reach Python-level analysis.
             raw_counts = Counter(_TOKEN_RE.findall(text.lower()))
@@ -347,6 +459,105 @@ class InvertedIndex:
         # collection they are hundreds of megabytes, and save() is about to
         # want that space for encoding scratch.
         del posting_terms, posting_docs, posting_freqs
+
+    def build_from_file(
+        self,
+        corpus_path: str,
+        remove_stopwords: bool = True,
+        stemming: bool = True,
+        forward_terms_per_doc: int = DEFAULT_FORWARD_TERMS_PER_DOC,
+        title_boost: int = 1,
+        workers: int = None,
+    ) -> None:
+        """`build()`, but reading the corpus file in parallel.
+
+        Tokenisation is two thirds of build time and runs Python-level code,
+        so threads cannot parallelise it — processes can. The file is split
+        into byte ranges on line boundaries, each worker sweeps its range
+        under a chunk-local term numbering, and the parent remaps every chunk
+        onto one global lexicographic vocabulary. Because documents keep file
+        order and the final vocabulary is sorted, the merged index is
+        byte-identical to a serial `build()` (the tests assert this).
+
+        Falls back to the serial path for small files or if a pool cannot be
+        started.
+        """
+        workers = workers or min(4, os.cpu_count() or 1)
+        if workers < 2 or os.path.getsize(corpus_path) < 8 * 1024 * 1024:
+            return self._build_serial_from_file(
+                corpus_path, remove_stopwords, stemming, forward_terms_per_doc, title_boost
+            )
+        chunks = _corpus_chunks(corpus_path, workers)
+        jobs = [(corpus_path, lo, hi, remove_stopwords, stemming, forward_terms_per_doc, title_boost)
+                for lo, hi in chunks]
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                parts = list(pool.map(_sweep_chunk, jobs))
+        except Exception:  # pragma: no cover - environment-dependent
+            return self._build_serial_from_file(
+                corpus_path, remove_stopwords, stemming, forward_terms_per_doc, title_boost
+            )
+
+        self.remove_stopwords = remove_stopwords
+        self.stemming = stemming
+        self.forward_terms_per_doc = forward_terms_per_doc
+
+        # Global vocabulary: sorted union of the chunk vocabularies — exactly
+        # the term set (and order) a serial build would produce.
+        self.terms = sorted(set().union(*(set(v) for _d, _l, v, *_ in parts)))
+        global_id = {t: i for i, t in enumerate(self.terms)}
+
+        term_arrays, doc_arrays, freq_arrays = [], [], []
+        fwd_t, fwd_f, fwd_c = [], [], []
+        doc_ids: List[str] = []; doc_len_all = []
+        doc_base = 0
+        for d_ids, d_len, vocab, pt, pd, pf, ft, ff, fc in parts:
+            remap = np.asarray([global_id[t] for t in vocab], dtype=np.int32)
+            local_terms = np.frombuffer(pt, dtype=np.int32)
+            term_arrays.append(remap[local_terms] if local_terms.size else local_terms)
+            doc_arrays.append(np.frombuffer(pd, dtype=np.int32) + doc_base)
+            freq_arrays.append(np.frombuffer(pf, dtype=np.int32))
+            if forward_terms_per_doc:
+                lf = np.frombuffer(ft, dtype=np.int32)
+                fwd_t.append(remap[lf] if lf.size else lf)
+                fwd_f.append(np.frombuffer(ff, dtype=np.int32))
+                fwd_c.append(np.frombuffer(fc, dtype=np.int32))
+            doc_ids.extend(d_ids); doc_len_all.extend(d_len)
+            doc_base += len(d_ids)
+
+        self.doc_ids = doc_ids
+        self.doc_len = np.asarray(doc_len_all, dtype=np.int64)
+        self.N = len(doc_ids)
+        self.avg_doc_len = (float(self.doc_len.sum()) / self.N) if self.N else 0.0
+
+        identity = np.arange(len(self.terms), dtype=np.int64)
+        if forward_terms_per_doc and fwd_t:
+            from array import array as _arr
+            self._build_forward(
+                _np_to_array(np.concatenate(fwd_t)), _np_to_array(np.concatenate(fwd_f)),
+                _np_to_array(np.concatenate(fwd_c)), identity,
+            )
+        else:
+            self._fwd_starts = np.zeros(self.N + 1, dtype=np.int64)
+
+        self._invert(
+            _np_to_array(np.concatenate(term_arrays)) if term_arrays else b"",
+            _np_to_array(np.concatenate(doc_arrays)) if doc_arrays else b"",
+            _np_to_array(np.concatenate(freq_arrays)) if freq_arrays else b"",
+            identity,
+        )
+
+    def _build_serial_from_file(self, corpus_path, remove_stopwords, stemming, fwd, title_boost=1):
+        def stream():
+            with open(corpus_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        obj = json.loads(line)
+                        yield obj["doc_id"], obj["text"]
+        self.build(stream(), remove_stopwords, stemming, fwd, title_boost=title_boost)
 
     def _build_forward(self, fwd_terms, fwd_freqs, fwd_counts, rank_of_old_id) -> None:
         """Re-map the forward index onto lexicographic term ids and restore
@@ -583,6 +794,11 @@ class InvertedIndex:
 
 
 _EMPTY = np.zeros(0, dtype=np.int32)
+
+
+def _np_to_array(a: np.ndarray):
+    """int32 ndarray -> bytes acceptable to np.frombuffer in _invert/_build_forward."""
+    return np.ascontiguousarray(a, dtype=np.int32).tobytes()
 
 
 def _rank_of_term(df) -> np.ndarray:
